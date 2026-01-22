@@ -17,6 +17,9 @@ def local_css():
     .question-text { font-size: 22px !important; font-weight: 600; line-height: 1.6; color: #1a1a1a; }
     .stCheckbox { font-size: 18px !important; }
     .stRadio > label { font-size: 18px !important; font-weight: 500; }
+    .result-box { padding: 15px; border-radius: 10px; margin-top: 10px; font-weight: bold; }
+    .correct { background-color: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
+    .wrong { background-color: #ffebee; color: #c62828; border: 1px solid #ffcdd2; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -45,27 +48,15 @@ def load_data(f): return pd.read_csv(f).fillna("")
 
 # --- 3. 核心工具：精准切分题干与选项 ---
 def split_q_and_opts(raw_q):
-    """
-    修复逻辑：
-    1. 使用正则寻找 [字母+点/顿号] 格式。
-    2. 增加边界约束 (?:^|\s)，防止 DNA, RNA 干扰。
-    """
-    # 匹配 A. B、 C  这种格式，且前面是开头或空格
     opt_marks = list(re.finditer(r'(?:^|\s)([A-G][\.、\s])', raw_q))
-    
     if not opt_marks:
         return raw_q.strip(), []
-    
-    # 第一个选项标记之前的全部是题干
     clean_q = raw_q[:opt_marks[0].start()].strip()
-    
-    # 提取所有选项内容
     opts = []
     for i in range(len(opt_marks)):
         start = opt_marks[i].start()
         end = opt_marks[i+1].start() if i+1 < len(opt_marks) else len(raw_q)
         opts.append(raw_q[start:end].strip())
-        
     return clean_q, opts
 
 # --- 4. 导入逻辑 ---
@@ -85,7 +76,6 @@ def smart_import(text, category):
             ans_raw = a_match.group(1).strip().upper()
             p_content = p_match.group(1).strip() if p_match else "无"
             
-            # 题型判断
             _, temp_opts = split_q_and_opts(q_raw)
             if any(x in ans_raw for x in ["正确", "错误", "对", "错", "√", "×"]):
                 t_type = "判断"
@@ -95,7 +85,6 @@ def smart_import(text, category):
                 t_type = "单选"
             else:
                 t_type = "大题"
-            
             new_rows.append([category, t_type, q_raw, ans_raw, p_content, ""])
     if new_rows:
         pd.DataFrame(new_rows, columns=COLUMNS).to_csv(FILE_NAME, mode='a', header=False, index=False)
@@ -183,12 +172,9 @@ else:
         
         st.progress((cur_idx + 1) / len(current_work_df))
         
-        # --- 使用修复后的切分逻辑 ---
         clean_q, opts = split_q_and_opts(str(item["题目"]))
-        
         st.markdown(f'<div class="question-card"><div class="question-text">【{item["模块"]}】 第 {range_idx*step + cur_idx + 1} 题<br>{clean_q}</div></div>', unsafe_allow_html=True)
         
-        # 导航按钮
         nav_col1, nav_col2, _ = st.columns([1, 1, 2])
         if nav_col1.button("⬅️ 上一题"): 
             st.session_state.study_idx -= 1; st.rerun()
@@ -196,23 +182,56 @@ else:
             st.session_state.study_idx += 1; st.rerun()
         st.write("---")
 
-        show_result = False
+        # --- 核心修改：判题逻辑 ---
+        show_ans = False
+        user_correct = False
+        
+        # 预处理标准答案（转大写、去空格）
+        std_ans = str(item['答案']).strip().upper()
+
         if item['题型'] == "判断":
-            u_ans = st.radio("判断：", ["尚未作答", "正确", "错误"], horizontal=True, key=f"j_{cur_idx}")
-            if u_ans != "尚未作答": show_result = True
+            # 判断题逻辑映射
+            u_ans = st.radio("请判断：", ["尚未作答", "正确", "错误"], horizontal=True, key=f"j_{cur_idx}")
+            if u_ans != "尚未作答":
+                show_ans = True
+                # 处理各种可能的正确答案写法
+                positives = ["正确", "对", "√", "T", "TRUE"]
+                negatives = ["错误", "错", "×", "F", "FALSE"]
+                is_std_positive = any(p in std_ans for p in positives)
+                user_correct = (u_ans == "正确" and is_std_positive) or (u_ans == "错误" and not is_std_positive)
+
         elif opts:
             if item['题型'] == "多选":
                 u_sel = [st.checkbox(o, key=f"m_{cur_idx}_{i}") for i, o in enumerate(opts)]
-                if st.button("提交答案"): show_result = True
+                if st.button("提交答案"):
+                    show_ans = True
+                    # 提取选中的字母，如 ['A', 'B'] -> "AB"
+                    selected_letters = "".join(sorted([opts[i].strip()[0].upper() for i, checked in enumerate(u_sel) if checked]))
+                    # 清理标准答案中的非大写字母（如逗号、空格）
+                    std_letters = "".join(sorted(re.findall(r'[A-G]', std_ans)))
+                    user_correct = (selected_letters == std_letters)
             else:
+                # 单选逻辑
                 choice = st.radio("请选择：", opts, index=None, key=f"s_{cur_idx}")
-                if choice: show_result = True
+                if choice:
+                    show_ans = True
+                    user_choice_letter = choice.strip()[0].upper()
+                    std_letter = std_ans[0] if std_ans else ""
+                    user_correct = (user_choice_letter == std_letter)
         else:
-            if st.button("查看答案与解析"): show_result = True
+            if st.button("查看答案与解析"):
+                show_ans = True
+                user_correct = None # 大题无法自动判断
 
-        if show_result:
-            st.success(f"**正确答案：** {item['答案']}")
-            st.info(f"**解析：** {item['解析']}")
+        # 显示判断结果
+        if show_ans:
+            if user_correct is True:
+                st.markdown('<div class="result-box correct">✅ 回答正确！</div>', unsafe_allow_html=True)
+            elif user_correct is False:
+                st.markdown(f'<div class="result-box wrong">❌ 回答错误！正确答案是：{item["答案"]}</div>', unsafe_allow_html=True)
+            
+            st.info(f"**【解析】**：{item['解析']}")
+            
             if st.button("💔 记入错题本"):
                 pd.DataFrame([item]).to_csv(WRONG_FILE, mode='a', header=False, index=False)
-                st.toast("已记录")
+                st.toast("已同步至错题本")
